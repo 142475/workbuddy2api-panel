@@ -193,7 +193,7 @@ const end = src.indexOf('function rateLimitRowsHtml');
 if (start < 0 || end < 0) throw new Error('rate limit helpers not found');
 const ctx = { Date, Number, String, Math };
 vm.createContext(ctx);
-vm.runInContext(src.slice(start, end) + '\nthis.rateLimitMeta=rateLimitMeta;', ctx);
+vm.runInContext("'use strict';\n" + src.slice(start, end) + '\nthis.rateLimitMeta=rateLimitMeta;', ctx);
 const now = new Date(2026, 8, 28, 14, 0, 0).getTime();
 const reset = new Date(2026, 8, 28, 16, 0, 0).getTime();
 const until = new Date(2026, 8, 28, 15, 0, 0).getTime();
@@ -221,6 +221,69 @@ process.stdout.write(JSON.stringify({
 	const want = `{"rate":"网关 2026-09-28 15:00 起重试（剩余 1时00分） · 上游称 2026-09-28 16:00 恢复","unavailable":"预计 1时00分 后重试","unknown":"预计解封时间未知"}`
 	if strings.TrimSpace(string(out)) != want {
 		t.Fatalf("rate-limit formatting=%s want %s", out, want)
+	}
+}
+
+// 单块渲染失败必须不连坐：首页账号池 / 模型锁池 / 到期卡共用 loadOverview 的同一个
+// try 块，任何一块抛错都会让后面几块一起空白（rateLimitMeta 未声明变量那次事故）。
+// safeRender 负责把错误收进自己的容器，让其余块继续渲染。
+func TestAppJSSafeRenderIsolates(t *testing.T) {
+	node, err := exec.LookPath("node")
+	if err != nil {
+		t.Skip("node not installed; safeRender isolation test skipped")
+	}
+	script := `const fs = require('fs');
+const vm = require('vm');
+const src = fs.readFileSync(process.argv[2], 'utf8');
+const start = src.indexOf('function safeRender(');
+const end = src.indexOf('function renderAccounts(');
+if (start < 0 || end < 0) throw new Error('safeRender not found');
+const boxes = {};
+const ctx = {
+  esc: s => String(s),
+  $: id => (boxes[id] = boxes[id] || { innerHTML: '' }),
+  console: { error: () => {} },
+};
+vm.createContext(ctx);
+vm.runInContext("'use strict';\n" + src.slice(start, end) + '\nthis.safeRender=safeRender;', ctx);
+const ran = [];
+const okRet = ctx.safeRender('甲块', 'boxA', () => ran.push('a'));
+const badRet = ctx.safeRender('乙块', 'boxB', () => { throw new Error('boom'); });
+const afterRet = ctx.safeRender('丙块', 'boxC', () => ran.push('c'));
+const tbodyRet = ctx.safeRender('丁块', 'boxD', () => { throw new Error('tbody'); }, 9);
+process.stdout.write(JSON.stringify({
+  ran: ran.join(','),
+  ok: okRet, bad: badRet, after: afterRet,
+  badHtml: boxes.boxB.innerHTML,
+  okHtml: boxes.boxA ? boxes.boxA.innerHTML : '<未创建>',
+  tbodyHtml: boxes.boxD ? boxes.boxD.innerHTML : '<未创建>',
+}));`
+	f, err := os.CreateTemp(t.TempDir(), "safe-render-*.cjs")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.WriteString(script); err != nil {
+		t.Fatal(err)
+	}
+	f.Close()
+	out, err := exec.Command(node, f.Name(), "app.js").CombinedOutput()
+	if err != nil {
+		t.Fatalf("safeRender isolation node test failed: %v\n%s", err, out)
+	}
+	got := strings.TrimSpace(string(out))
+	for _, want := range []string{
+		`"ran":"a,c"`,
+		`"ok":true`,
+		`"bad":false`,
+		`"after":true`,
+		`乙块渲染失败：boom`,
+		`丁块渲染失败：tbody`,
+		`<tr><td colspan=`,
+		`"okHtml":"<未创建>"`,
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("safeRender isolation output missing %s: %s", want, got)
+		}
 	}
 }
 

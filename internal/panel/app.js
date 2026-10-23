@@ -379,6 +379,26 @@ setTimeout(() => {
   go(hash in TITLES ? hash : 'accounts');
 }, 0);
 
+/* 单块渲染失败不连坐。首页三块（账号池 / 模型锁池 / 到期卡）共用 loadOverview
+   的同一个 try 块，先执行的那块一旦抛错，后面两块压根不执行——曾因
+   rateLimitMeta 里一个未声明变量，三块同时空白而只弹一个 toast。safeRender
+   把每块单独包起来：坏的那块在自己容器里降级成一行错误提示（tbody 容器用
+   tbodyCols 指定 colspan），其余照常渲染，控制台保留完整堆栈。 */
+function safeRender(label, boxId, fn, tbodyCols) {
+  try {
+    fn();
+    return true;
+  } catch (e) {
+    console.error('[panel] ' + label + '渲染失败：', e);
+    const box = boxId ? $(boxId) : null;
+    if (box) {
+      const msg = '<div class="empty">' + esc(label) + '渲染失败：' + esc((e && e.message) || String(e)) + '</div>';
+      box.innerHTML = tbodyCols ? '<tr><td colspan="' + tbodyCols + '">' + msg + '</td></tr>' : msg;
+    }
+    return false;
+  }
+}
+
 /* ── 账号池 ───────────────────────────────────────────────────────── */
 function renderAccounts(list) {
   const tb = $('accBody');
@@ -525,13 +545,13 @@ async function loadOverview(quiet) {
     $('accNote').textContent = d.in_flight_full ? d.in_flight_full + ' 个账号在途占满' : '';
     const up = Math.floor(d.uptime_sec);
     $('subMeta').textContent = '运行 ' + (up >= 86400 ? Math.floor(up / 86400) + ' 天 ' : '') + Math.floor(up % 86400 / 3600) + ' 时 ' + Math.floor(up % 3600 / 60) + ' 分';
-    renderAccounts(d.accounts || []);
-    renderModelLocks(d.model_locks);
+    safeRender('账号池', 'accBody', () => renderAccounts(d.accounts || []), 9);
+    safeRender('模型锁池', 'mlBody', () => renderModelLocks(d.model_locks), 8);
     // 到期卡片跟随首页统计同步刷新（用同一份响应里的按日批次，不额外发请求）。
     // 2 分钟内的实时明细最新且更全，保留；过期后由 state 快照接管，避免点过一次
     // 「检查」之后卡片永远停在那一刻的旧数据。
     const liveFresh = lastPackages && (Date.now() - lastPackagesAt) < EXP_FRESH_MS;
-    if ($('expBox') && !liveFresh) renderExpirySnapshot(d);
+    if ($('expBox') && !liveFresh) safeRender('积分到期提醒', 'expList', () => renderExpirySnapshot(d));
   } catch (e) { if (!quiet) toast(e.message, 'err'); }
 }
 
