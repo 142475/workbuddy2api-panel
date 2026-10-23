@@ -183,6 +183,8 @@ WorkBuddy2API 是一个自托管的 **OpenAI 兼容反向代理网关**，将腾
 | **领养前置修复** | 上游 `travelAdopt` 缺 report 前置导致领养恒失败于 `first_buddy task not completed yet`；本分支修正后实测 +300 到账（3/3 账号） |
 | **原生工具调用标记还原** | 上游（DeepSeek 系）的工具调用原生语法是带全角竖线的标记文本，**仅在请求声明了 `tools` 时**才被上游解析成结构化 `tool_calls`。实测 `tools` 声明在中转环节（Responses → chat/completions 等）丢失是常态，此时模型仍想调工具，标记就以纯文本落进 `content`——Codex 这类只执行结构化 `function_call` 的客户端会把它当普通正文写进会话历史，回合直接结束、工具一次都没跑。网关在出站响应里识别并还原成 `tool_calls`（流式与非流式都覆盖） |
 
+| **首页渲染互不连坐** | 账号池 / 模型锁池 / 积分到期提醒三块各自独立 `safeRender` 包裹：任一块渲染抛错只把该块降级成错误提示，其余两块照常出数（此前三个渲染函数共用一个 `try` 块，一处 `ReferenceError` 整页全空）。前端测试改为在 Node `vm` 里以 `'use strict'` 执行 `app.js` 片段，未声明变量直接 ReferenceError——治「浏览器整块空白、本地测试却全绿」的盲区 |
+
 ### 同步上游
 
 **第一轮（fork 基线 `53ee3a1` → `9a87758`，34 个提交）**：四类任务独立排程、pool 文件拆分、12153 连续计数才禁用、429 `code=6004` 模型级限流收窄、11101 不罚号、请求体 413、DeepSeek 思维链、reasoning_content 回填、Codex 指纹脱敏、系统提示词体系、出站 UA 可配等。
@@ -201,6 +203,30 @@ WorkBuddy2API 是一个自托管的 **OpenAI 兼容反向代理网关**，将腾
 未吸收（明确不做）：脚本体系（task_runner/school 脚本—我们已有更完整的纯 API 实现）、governance/CI workflow、成本账本选号（依赖 usage.credit 观测，收益待验证）。
 
 > 上游仓库此后已删除，上述第二轮（`ea8b1e5`）即其**删库前的最后一次更新**，本分支已完整吸收。此后本仓库与上游不再有同步关系，演进以本仓库为准。
+
+## 性能基线（2026-10-23 实测）
+
+9 账号、单机 Docker 部署下的实测基线，供扩容与排障对照（**当前无性能瓶颈**）：
+
+| 指标 | 实测值 |
+| --- | --- |
+| 容器 CPU / 内存 | 0.08% / 15.3 MiB（未设 cgroup 限制） |
+| `/panel/api/overview` | 2–3 ms，23.6 KB（未压缩） |
+| 数据目录 | 18 MB（`usage.json` 460 KB、`state.json` 34 KB） |
+| 并发天花板 | 每号在途 3（global 2）× 9 号 = **27** |
+
+已量化但**未实施**的优化余量。当前负载下收益不可感知，QPS 上来或出现内存异常时按此顺序做：
+
+| 项 | 现状 | 优化后 | 预期收益 |
+| --- | --- | --- | --- |
+| 请求体重复解析 | 单请求对 body 做 6 次完整 `json.Unmarshal`（`peek` / `ToolNameAllowlist` / `ExtractKey` / `TurnKey` / `hasImagePart` / `ResolveConversationID`），提示词改写再各来一次 `map` + `Marshal` | 一次解析到统一结构 | 22 KB 请求 1.68 → 0.29 ms；102 KB 12.85 → 1.66 ms（单核吞吐 5.7× / 7.7×） |
+| 响应未压缩 | 面板首屏 `app.js`+`index.html`+`mobile.css` = 279 KB；`overview` 23.6 KB | 加 gzip | 首屏 → 87 KB（−69%）；`overview` → 3.5 KB（−85%）。静态资源是 `go:embed`，可启动时预压缩，零 CPU 成本 |
+| 请求体无上限 | `io.ReadAll(r.Body)` 不设限（刻意对齐上游） | 32 MB 上限 + 413 | 封死 OOM 入口（非提速） |
+| 并发天花板 | 每号在途 3 | 4–6（需先观察上游风控与失败率） | 27 → 45+ |
+| SSE 逐行分配 | `bufio.ReadString('\n')`，每事件一次堆分配 | `ReadSlice` 零拷贝 | GC 次数 −30~50%（估算） |
+| 前端轮询 | 5 s 固定轮询 + 三块全量重渲染，无 `document.hidden` 判断 | 隐藏页暂停/降频 | 后台标签流量 −100% |
+
+> 实测方法：`docker stats` + `curl -w '%{time_total} %{size_download}'` 取接口基线；解析成本用独立 `main.go` 在 `golang:1.23-alpine` 里对 22 KB / 102 KB 构造体跑微基准（不依赖仓库代码）；压缩率用真实响应 `gzip -9` 实测。
 
 ## 架构总览
 
