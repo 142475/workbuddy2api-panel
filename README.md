@@ -273,7 +273,7 @@ mkdir -p auths data && cp config.example.json config.json
 docker run -d --name workbuddy2api \
   -p 7863:7863 -e TZ=Asia/Shanghai \
   -v ./auths:/app/auths -v ./data:/app/data -v ./config.json:/app/config.json \
-  ghcr.io/linguo2625469/workbuddy2api-panel:latest
+  ghcr.io/142475/workbuddy2api-panel:latest
 
 # 3. 健康检查（无可用账号时返回 503）
 curl -s http://localhost:7863/healthz
@@ -289,7 +289,7 @@ curl -s http://localhost:7863/healthz
 
 ```bash
 # 1. 克隆
-git clone https://github.com/linguo2625469/workbuddy2api-panel.git
+git clone https://github.com/142475/workbuddy2api-panel.git
 cd workbuddy2api-panel
 
 # 2. 准备配置（compose 挂载此文件，缺失会导致容器启动失败）
@@ -346,6 +346,20 @@ CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o signin_bin ./cmd/signin
 CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o login ./cmd/login
 CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o credit ./cmd/credit
 ```
+
+### 更新已有部署
+
+三种部署方式的更新动作不同，**前端改动尤其容易漏**：面板的 `app.js` / `index.html` 是 `go:embed` 打进二进制的，改完必须重新构建镜像，`docker compose restart` 不会生效。
+
+| 部署方式 | 更新命令 | 备注 |
+| --- | --- | --- |
+| GHCR 镜像 | `docker compose pull && docker compose up -d` | 跟 `latest` 会漂移，生产建议钉 `sha-xxxxxx` 或 digest |
+| 本地构建 | `git pull --ff-only && docker compose build && docker compose up -d` | 改了 `internal/panel/*.js/css/html` 必须走这条 |
+| Windows 单文件 | 重新下载 `wb2api.exe` 覆盖 | 同上，前端已内嵌进 exe |
+
+**改完怎么确认生效**：`curl -s http://<host>:<port>/healthz` 先看账号数，再打开面板 `#accounts` 页确认「账号池 / 模型锁池 / 积分到期提醒」三块都有数据。只查接口查不出前端问题——这三块曾因一个前端变量未声明而整页空白，而 `/panel/api/overview` 一直返回正常 JSON。
+
+**自动化**：镜像方式可以 cron 每天 `docker pull` 后比对镜像 ID，变了才 `up -d`，失败回滚旧镜像并告警；源码方式则是 `git pull` 后再 `build`。**两条链路不要同时挂**，会互相覆盖容器。
 
 ### 添加账号（登录）
 
